@@ -12,15 +12,16 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from jobs import job_manager, JobStatus, JobModel
-from config import BASE_DIR, OUTPUT_DIR
+from history import lead_history
+from config import BASE_DIR, OUTPUT_DIR, BRAZIL_REGIONS
 
 app = FastAPI(
     title="AI Fitness Lead Scraper API",
     description=(
-        "API Cloud de Prospecção Automatizada de Leads Fitness no Brasil com enriquecimento via IA "
-        "e geração de planilhas Excel / JSON. Pronta para integração com SaaS e Supabase."
+        "API Cloud de Prospecção Automatizada de Leads Fitness no Brasil com histórico persistente anti-duplicidade, "
+        "enriquecimento via IA e geração de planilhas Excel / JSON. Pronta para integração com SaaS e Supabase."
     ),
-    version="1.0.0",
+    version="1.1.0",
     docs_url="/docs",
     redoc_url="/redoc",
 )
@@ -39,7 +40,7 @@ app.add_middleware(
 class CreateJobRequest(BaseModel):
     mode: str = Field(
         default="standard",
-        description="'standard' (nicho e cidade específicos) ou 'autopilot' (varredura automática Brasil)",
+        description="'standard' (nicho e cidade específicos) ou 'autopilot' (varredura automática Brasil com rotação)",
         examples=["standard"],
     )
     query: Optional[str] = Field(
@@ -68,6 +69,16 @@ class CreateJobRequest(BaseModel):
         default=None,
         description="URL do seu SaaS para receber o payload completo quando a raspagem terminar",
         examples=["https://meusaas.com/api/webhooks/leads"],
+    )
+    exclude_phones: Optional[List[str]] = Field(
+        default_factory=list,
+        description="Lista de telefones existentes no Supabase/SaaS a serem ignorados nesta busca",
+        examples=[["11999998888", "31988887777"]],
+    )
+    exclude_names: Optional[List[str]] = Field(
+        default_factory=list,
+        description="Lista de nomes de academias existentes a serem ignorados",
+        examples=[["Academia Smart Fit", "Bluefit"]],
     )
     metadata: Optional[Dict[str, Any]] = Field(
         default_factory=dict,
@@ -130,6 +141,8 @@ async def create_scraper_job(
         target_leads=req.target_leads,
         service_description=req.service_description or "",
         webhook_url=req.webhook_url,
+        exclude_phones=req.exclude_phones,
+        exclude_names=req.exclude_names,
         metadata=req.metadata,
     )
 
@@ -144,6 +157,16 @@ async def create_scraper_job(
         results_url=f"/api/v1/scraper/jobs/{job.job_id}/results",
         download_url=f"/api/v1/scraper/jobs/{job.job_id}/download",
     )
+
+
+@app.get(
+    "/api/v1/scraper/history",
+    tags=["Histórico & Memória"],
+    summary="Consultar estatísticas da memória histórica de leads e cursor geográfico",
+)
+async def get_history_stats():
+    """Retorna o total de leads únicos gravados, telefones únicos e o cursor atual de rotação das regiões."""
+    return lead_history.get_stats()
 
 
 @app.get(

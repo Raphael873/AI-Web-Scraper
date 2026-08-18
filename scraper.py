@@ -129,15 +129,25 @@ async def extract_panel_details(page: Page) -> Dict[str, Any]:
     return data
 
 
-async def scrape_google_maps(query: str, max_results: int = 30) -> List[Dict[str, Any]]:
+from history import lead_history
+
+
+async def scrape_google_maps(
+    query: str,
+    max_results: int = 30,
+    skip_history_check: bool = False,
+    extra_excluded_phones: Optional[Set[str]] = None,
+    extra_excluded_names: Optional[Set[str]] = None,
+) -> List[Dict[str, Any]]:
     """
-    Executa a raspagem completa no Google Maps para uma dada consulta.
+    Executa a raspagem completa no Google Maps para uma dada consulta,
+    pulando automaticamente estabelecimentos que já estejam no histórico.
     """
     encoded_query = urllib.parse.quote(query)
     search_url = f"https://www.google.com/maps/search/{encoded_query}/?hl=pt-BR"
     
     leads: List[Dict[str, Any]] = []
-    seen_names = set()
+    seen_in_this_run = set()
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -165,38 +175,32 @@ async def scrape_google_maps(query: str, max_results: int = 30) -> List[Dict[str
         await asyncio.sleep(2)
 
         # Verificar se abriu direto no detalhe de 1 estabelecimento
-        if await page.locator(SELECTORS["title"]).is_visible(timeout=3000):
-            # Caso seja resultado único
-            feed_visible = await page.locator(SELECTORS["feed"]).is_visible(timeout=1000)
+        if await page.locator("h1.DUwDvf").is_visible(timeout=3000):
+            feed_visible = await page.locator("div[role='feed']").is_visible(timeout=1000)
             if not feed_visible:
                 lead = await extract_panel_details(page)
                 if lead["name"]:
-                    leads.append(lead)
-                    await browser.close()
-                    return leads
+                    if not skip_history_check and lead_history.is_duplicate(
+                        lead["name"], lead.get("phone"), lead.get("maps_url"),
+                        extra_excluded_phones, extra_excluded_names
+                    ):
+                        print(f"  ⏭️ [Pulado - Já no histórico]: {lead['name']}")
+                    else:
+                        leads.append(lead)
+                await browser.close()
+                return leads
 
-        # Caso seja uma lista de resultados
-        feed_locator = page.locator(SELECTORS["feed"])
-        try:
-            await feed_locator.wait_for(state="visible", timeout=10000)
-        except Exception:
-            print("⚠️ Não foi possível encontrar a lista de estabelecimentos. Tentando seletores alternativos...")
-
-        print(f"⏳ Rolando feed para carregar até {max_results} estabelecimentos...")
-        
         # Rolar o feed para carregar os cards necessários
         scroll_attempts = 0
-        max_scroll_attempts = max(max_results // 2, 10)
+        max_scroll_attempts = max(max_results // 2, 12)
         
         while scroll_attempts < max_scroll_attempts:
-            # Seleciona apenas os cards reais de estabelecimentos (div.Nv2PK)
             cards = page.locator("div[role='feed'] div.Nv2PK")
             count = await cards.count()
             
             if count >= max_results:
                 break
 
-            # Rola o feed para baixo
             try:
                 await page.evaluate("""
                     const feed = document.querySelector("div[role='feed']");
@@ -209,59 +213,78 @@ async def scrape_google_maps(query: str, max_results: int = 30) -> List[Dict[str
 
             await asyncio.sleep(1.2)
             
-            # Checar se chegou ao fim da lista
             end_of_list = await page.locator("text='Você chegou ao final da lista.'").is_visible(timeout=400)
             if end_of_list:
                 break
                 
             scroll_attempts += 1
 
-        # Agora iterar sobre cada card real
         cards = page.locator("div[role='feed'] div.Nv2PK")
         total_found = await cards.count()
-        target_count = min(total_found, max_results)
         
-        print(f"📌 {total_found} estabelecimentos encontrados. Extraindo detalhes de {target_count} leads...")
+        print(f"📌 {total_found} estabelecimentos listados no Maps. Filtrando inéditos...")
 
-        for i in range(target_count):
+        for i in range(total_found):
+            if len(leads) >= max_results:
+                break
+
             try:
                 card = cards.nth(i)
                 await card.scroll_into_view_if_needed()
                 
-                # Extrai nome preliminar diretamente do card para segurança
+                # 1. Checagem prévia pelo nome antes de clicar
                 card_name = ""
                 name_elem = card.locator("div.qBF1Pd, a.hfpxzc").first
-                if await name_elem.is_visible(timeout=500):
+                if await name_elem.is_visible(timeout=400):
                     card_name = clean_text(await name_elem.inner_text() or await name_elem.get_attribute("aria-label") or "")
 
-                # Clica no link do estabelecimento para abrir o painel lateral completo
+                # Se já vimos nesta execução ou já está no histórico histórico, pula instantaneamente
+                if card_name in seen_in_this_run:
+                    continue
+
+                if not skip_history_check and card_name and lead_history.is_duplicate(
+                    name=card_name,
+                    extra_excluded_phones=extra_excluded_phones,
+                    extra_excluded_names=extra_excluded_names
+                ):
+                    print(f"  ⏭️ [Pulado - Já prospectado]: {card_name}")
+                    continue
+
+                # 2. Clica para abrir o painel lateral completo
                 link_elem = card.locator("a.hfpxzc").first
-                if await link_elem.is_visible(timeout=1000):
+                if await link_elem.is_visible(timeout=800):
                     await link_elem.click()
                 else:
                     await card.click()
 
-                await asyncio.sleep(1.3)
+                await asyncio.sleep(1.2)
 
-                # Extrai dados do painel lateral
                 lead_data = await extract_panel_details(page)
                 
-                # Se o nome no painel for inválido ou for o cabeçalho 'Resultados', usa o nome do card
                 if not lead_data["name"] or lead_data["name"].lower().startswith("resultado"):
                     lead_data["name"] = card_name
 
-                # Se a categoria estiver vazia, tenta pegar da consulta ou do card
                 if not lead_data["category"]:
                     lead_data["category"] = query.split(" em ")[0]
 
-                # Evita duplicidades e nomes vazios
-                if lead_data["name"] and not lead_data["name"].lower().startswith("resultado") and lead_data["name"] not in seen_names:
-                    seen_names.add(lead_data["name"])
+                # 3. Segunda validação de duplicidade após pegar telefone e URL
+                final_name = lead_data["name"]
+                if final_name and not final_name.lower().startswith("resultado") and final_name not in seen_in_this_run:
+                    if not skip_history_check and lead_history.is_duplicate(
+                        name=final_name,
+                        phone=lead_data.get("phone"),
+                        maps_url=lead_data.get("maps_url"),
+                        extra_excluded_phones=extra_excluded_phones,
+                        extra_excluded_names=extra_excluded_names,
+                    ):
+                        print(f"  ⏭️ [Pulado - Telefone/Nome já registrado]: {final_name}")
+                        continue
+
+                    seen_in_this_run.add(final_name)
                     leads.append(lead_data)
-                    print(f"  ✓ [{len(leads)}/{target_count}] {lead_data['name']} | Tel: {lead_data['phone'] or 'S/ Tel'} | ⭐ {lead_data['rating'] or 'S/ Nota'}")
+                    print(f"  ✨ [{len(leads)}/{max_results}] {final_name} | Tel: {lead_data['phone'] or 'S/ Tel'} | ⭐ {lead_data['rating'] or 'S/ Nota'}")
                     
-            except Exception as e:
-                # Se falhar em um card específico, continua para o próximo
+            except Exception:
                 continue
 
         await browser.close()

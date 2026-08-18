@@ -1,6 +1,7 @@
 """
 Módulo de Gerenciamento de Tarefas (Job Manager)
-Controla execuções assíncronas em background, progresso em tempo real, persistência e Webhooks.
+Controla execuções assíncronas em background, progresso em tempo real, persistência,
+histórico de leads sem duplicidades e Webhooks.
 """
 
 import os
@@ -10,7 +11,7 @@ import asyncio
 import random
 from datetime import datetime
 from enum import Enum
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Set
 import httpx
 from pydantic import BaseModel, Field
 
@@ -19,6 +20,7 @@ from scraper import scrape_google_maps
 from enricher import enrich_lead_website
 from ai_enricher import process_lead_with_ai
 from exporter import export_leads, format_brazilian_phone
+from history import lead_history
 
 
 class JobStatus(str, Enum):
@@ -44,6 +46,8 @@ class JobModel(BaseModel):
     target_leads: int = 30
     service_description: str = ""
     webhook_url: Optional[str] = None
+    exclude_phones: List[str] = Field(default_factory=list)
+    exclude_names: List[str] = Field(default_factory=list)
     metadata: Dict[str, Any] = Field(default_factory=dict)
     status: JobStatus = JobStatus.QUEUED
     progress: JobProgress = Field(default_factory=JobProgress)
@@ -71,6 +75,8 @@ class JobManager:
         target_leads: int = 30,
         service_description: str = "",
         webhook_url: Optional[str] = None,
+        exclude_phones: Optional[List[str]] = None,
+        exclude_names: Optional[List[str]] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> JobModel:
         job_id = f"job_{uuid.uuid4().hex[:12]}"
@@ -82,6 +88,8 @@ class JobManager:
             target_leads=target_leads,
             service_description=service_description,
             webhook_url=webhook_url,
+            exclude_phones=exclude_phones or [],
+            exclude_names=exclude_names or [],
             metadata=metadata or {},
             progress=JobProgress(target=target_leads),
         )
@@ -119,7 +127,7 @@ class JobManager:
             print(f"⚠️ Erro ao enviar webhook para {job.webhook_url}: {e}")
 
     async def run_job(self, job_id: str):
-        """Executa a raspagem em background para um dado job_id."""
+        """Executa a raspagem em background para um dado job_id com histórico e rotação."""
         job = self.get_job(job_id)
         if not job:
             return
@@ -129,16 +137,20 @@ class JobManager:
         job.progress.current_step = "Iniciando motor de busca no Google Maps..."
 
         all_leads: List[Dict[str, Any]] = []
-        seen_names = set()
+        seen_in_job = set()
+        extra_phones = set(job.exclude_phones)
+        extra_names = {n.lower().strip() for n in job.exclude_names}
 
         try:
             if job.mode == "autopilot":
-                # MODO PILOTO AUTOMÁTICO
+                # MODO PILOTO AUTOMÁTICO COM ROTAÇÃO GEOGRÁFICA
+                # Pega a próxima fatia de regiões a partir do cursor histórico
+                rotating_regions, start_idx = lead_history.get_next_regions(count=80)
+                
                 combinations = []
-                for reg in BRAZIL_REGIONS:
-                    for nic in FITNESS_NICHES[:4]:
+                for reg in rotating_regions:
+                    for nic in FITNESS_NICHES[:4]:  # Academia, Pilates, CrossFit, Funcional
                         combinations.append((nic, reg))
-                random.shuffle(combinations)
 
                 combo_idx = 0
                 while len(all_leads) < job.target_leads and combo_idx < len(combinations):
@@ -146,16 +158,22 @@ class JobManager:
                     current_query = f"{niche} em {region}"
                     combo_idx += 1
 
-                    job.progress.current_step = f"Varrendo região: {region} ({niche})"
+                    job.progress.current_step = f"Varrendo região {combo_idx}/{len(combinations)}: {region} ({niche})"
                     needed = job.target_leads - len(all_leads)
                     per_search_limit = min(max(needed, 10), 25)
 
-                    batch = await scrape_google_maps(query=current_query, max_results=per_search_limit)
+                    batch = await scrape_google_maps(
+                        query=current_query,
+                        max_results=per_search_limit,
+                        skip_history_check=False,
+                        extra_excluded_phones=extra_phones,
+                        extra_excluded_names=extra_names,
+                    )
 
                     for lead in batch:
                         lead_name = lead.get("name", "").strip()
-                        if lead_name and lead_name not in seen_names:
-                            seen_names.add(lead_name)
+                        if lead_name and lead_name not in seen_in_job:
+                            seen_in_job.add(lead_name)
                             
                             # Enriquecimento web
                             website = lead.get("website")
@@ -187,11 +205,17 @@ class JobManager:
                                 break
 
             else:
-                # MODO STANDARD (Busca específica)
+                # MODO STANDARD (Busca específica com verificação de histórico)
                 query_str = f"{job.query or 'Academia'} em {job.location or 'São Paulo, SP'}"
                 job.progress.current_step = f"Buscando estabelecimentos para: '{query_str}'"
 
-                raw_leads = await scrape_google_maps(query=query_str, max_results=job.target_leads)
+                raw_leads = await scrape_google_maps(
+                    query=query_str,
+                    max_results=job.target_leads,
+                    skip_history_check=False,
+                    extra_excluded_phones=extra_phones,
+                    extra_excluded_names=extra_names,
+                )
 
                 for idx, lead in enumerate(raw_leads, start=1):
                     job.progress.current_step = f"Enriquecendo lead {idx}/{len(raw_leads)}: {lead.get('name')}"
@@ -216,6 +240,10 @@ class JobManager:
                     all_leads.append(lead)
                     job.progress.collected = len(all_leads)
                     job.progress.percent = round((len(all_leads) / job.target_leads) * 100, 1)
+
+            # Grava leads no histórico persistente para nunca mais repetir
+            if all_leads:
+                lead_history.add_leads_batch(all_leads)
 
             # Exportação de arquivos
             job.progress.current_step = "Gerando planilha Excel e JSON final..."

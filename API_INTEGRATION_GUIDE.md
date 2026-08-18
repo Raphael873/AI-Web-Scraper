@@ -101,6 +101,7 @@ https://SEU_PROJETO.up.railway.app
   "target_leads": 30,
   "service_description": "Criação de sites e gestão de tráfego pago para academias",
   "webhook_url": "https://meusaas.com/api/webhooks/leads",
+  "exclude_phones": ["11999998888", "31988887777"],
   "metadata": {
     "user_id": "usr_998877",
     "tenant_id": "org_112233"
@@ -108,13 +109,14 @@ https://SEU_PROJETO.up.railway.app
 }
 ```
 
-#### Exemplo B: Piloto Automático em Massa (100, 500 ou 1000 leads no Brasil)
+#### Exemplo B: Piloto Automático em Massa com Rotação Contínua (100, 500 ou 1000 leads no Brasil)
 ```json
 {
   "mode": "autopilot",
   "target_leads": 500,
   "service_description": "Software de gestão e retenção de alunos para academias",
   "webhook_url": "https://meusaas.com/api/webhooks/leads",
+  "exclude_phones": ["11999998888"],
   "metadata": {
     "user_id": "usr_998877"
   }
@@ -135,7 +137,23 @@ https://SEU_PROJETO.up.railway.app
 
 ---
 
-### Endpoint 2: Consultar Status e Progresso (Polling)
+### Endpoint 2: Consultar Estatísticas de Memória e Histórico
+* **Método:** `GET`
+* **Rota:** `/api/v1/scraper/history`
+* **Resposta (`200 OK`):**
+```json
+{
+  "total_unique_leads_in_history": 1045,
+  "total_unique_phones": 750,
+  "current_region_cursor": 40,
+  "total_configured_regions": 251,
+  "last_updated": "2026-08-18T18:24:00Z"
+}
+```
+
+---
+
+### Endpoint 3: Consultar Status e Progresso (Polling)
 * **Método:** `GET`
 * **Rota:** `/api/v1/scraper/jobs/{job_id}`
 * **Resposta (`200 OK`):**

@@ -25,11 +25,17 @@ from ai_enricher import process_lead_with_ai
 from exporter import export_leads
 
 
+from history import lead_history
+
+
 def print_banner():
-    banner = """
+    stats = lead_history.get_stats()
+    banner = f"""
 ======================================================================
                🏋️  AI FITNESS LEAD SCRAPER (BRASIL)  🏋️               
       Prospeccao Inteligente de Academias, Studios & Pilates          
+======================================================================
+ 📊 Memória Histórica: {stats['total_unique_leads_in_history']} leads únicos | Região Atual: {stats['current_region_cursor']}/{stats['total_configured_regions']}
 ======================================================================
 """
     print(banner)
@@ -56,12 +62,12 @@ async def run_standard_pipeline(niche: str, location: str, max_results: int, ser
     query = f"{niche} em {location}".strip()
     
     print(f"\n🚀 Iniciando busca por: '{query}'")
-    print(f"🎯 Meta: Coletar até {max_results} estabelecimentos\n")
+    print(f"🎯 Meta: Coletar até {max_results} estabelecimentos inéditos\n")
 
-    leads = await scrape_google_maps(query=query, max_results=max_results)
+    leads = await scrape_google_maps(query=query, max_results=max_results, skip_history_check=False)
 
     if not leads:
-        print("\n❌ Nenhum estabelecimento foi encontrado. Tente ajustar o termo ou a localidade.")
+        print("\n❌ Nenhum estabelecimento novo foi encontrado nesta localidade (todos já foram prospectados antes).")
         return
 
     print(f"\n🌐 [2/3] Enriquecendo dados via Web (E-mails, Instagram e Redes)...")
@@ -83,6 +89,9 @@ async def run_standard_pipeline(niche: str, location: str, max_results: int, ser
     for idx, lead in enumerate(leads, start=1):
         process_lead_with_ai(lead, service_description=service_desc)
 
+    # Grava no histórico
+    lead_history.add_leads_batch(leads)
+
     print(f"\n💾 Gerando arquivos finais...")
     exported_files = export_leads(leads, query_name=f"{niche}_{location}")
 
@@ -97,23 +106,25 @@ async def run_standard_pipeline(niche: str, location: str, max_results: int, ser
 
 async def run_autopilot_pipeline(target_leads: int):
     """
-    MODO PILOTO AUTOMÁTICO:
-    Gera 100, 200, 500 ou 1000 leads únicos no Brasil sem perguntas manuais.
+    MODO PILOTO AUTOMÁTICO COM ROTAÇÃO CONTÍNUA:
+    Gera 100, 200, 500 ou 1000 leads únicos no Brasil sem perguntas manuais,
+    rotacionando cidades e bairros a cada execução.
     """
+    rotating_regions, start_idx = lead_history.get_next_regions(count=80)
+
     print(f"\n🔥 [MODO PILOTO AUTOMÁTICO ATIVADO]")
-    print(f"🎯 Meta: Coletar {target_leads} leads únicos do mercado fitness no Brasil.")
-    print(f"⚡ Estratégia: Varredura multi-regiões e multi-nichos com deduplicação em tempo real.\n")
+    print(f"🎯 Meta: Coletar {target_leads} leads 100% INÉDITOS no Brasil.")
+    print(f"📍 Rotatividade: Iniciando na região #{start_idx} de {len(BRAZIL_REGIONS)} pólos cadastrados.")
+    print(f"⚡ Anti-Duplicidade: Leads já capturados anteriormente serão pulados automaticamente.\n")
 
     all_leads: List[Dict[str, Any]] = []
-    seen_names = set()
+    seen_in_this_run = set()
 
-    # Gerar combinações de nichos e regiões
+    # Gerar combinações a partir das regiões da fatia atual
     combinations = []
-    for reg in BRAZIL_REGIONS:
-        for nic in FITNESS_NICHES[:4]:  # Foca nos principais: Academia, Pilates, CrossFit, Funcional
+    for reg in rotating_regions:
+        for nic in FITNESS_NICHES[:4]:  # Academia, Pilates, CrossFit, Funcional
             combinations.append((nic, reg))
-    
-    random.shuffle(combinations)  # Diversifica as buscas
 
     combo_idx = 0
     while len(all_leads) < target_leads and combo_idx < len(combinations):
@@ -125,13 +136,13 @@ async def run_autopilot_pipeline(target_leads: int):
         per_search_limit = min(max(needed, 10), 25)
 
         print(f"\n📍 [{len(all_leads)}/{target_leads} Leads] Varrendo: '{query}'...")
-        batch = await scrape_google_maps(query=query, max_results=per_search_limit)
+        batch = await scrape_google_maps(query=query, max_results=per_search_limit, skip_history_check=False)
 
         new_count = 0
         for lead in batch:
             lead_name = lead.get("name", "").strip()
-            if lead_name and lead_name not in seen_names:
-                seen_names.add(lead_name)
+            if lead_name and lead_name not in seen_in_this_run:
+                seen_in_this_run.add(lead_name)
                 # Enriquecimento web e IA
                 await process_single_lead_enrichment(lead)
                 all_leads.append(lead)
@@ -139,17 +150,21 @@ async def run_autopilot_pipeline(target_leads: int):
                 if len(all_leads) >= target_leads:
                     break
 
-        print(f"  ✨ +{new_count} novos leads adicionados! (Progresso total: {len(all_leads)}/{target_leads})")
+        print(f"  ✨ +{new_count} novos leads inéditos adicionados! (Progresso total: {len(all_leads)}/{target_leads})")
 
-        # Salva backup a cada 50 leads para garantir que nada se perca
+        # Salva backup a cada 50 leads
         if len(all_leads) % 50 == 0 and len(all_leads) > 0:
             export_leads(all_leads, query_name=f"Piloto_Automatico_Progresso_{len(all_leads)}")
 
-    print(f"\n💾 Consolidando e gerando planilha Excel final com {len(all_leads)} leads...")
+    # Grava todos os leads inéditos no histórico persistente
+    if all_leads:
+        lead_history.add_leads_batch(all_leads)
+
+    print(f"\n💾 Consolidando e gerando planilha Excel final com {len(all_leads)} leads inéditos...")
     exported_files = export_leads(all_leads, query_name=f"Piloto_Automatico_{len(all_leads)}_Leads")
 
     print("\n" + "=" * 70)
-    print(f"🎉 PILOTO AUTOMÁTICO FINALIZADO! ({len(all_leads)} LEADS COLETADOS)")
+    print(f"🎉 PILOTO AUTOMÁTICO FINALIZADO! ({len(all_leads)} LEADS INÉDITOS COLETADOS)")
     print("=" * 70)
     print(f"📁 Planilha Excel (.xlsx): {exported_files['excel']}")
     print(f"📄 Arquivo JSON (.json):   {exported_files['json']}")
