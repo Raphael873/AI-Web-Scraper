@@ -7,7 +7,7 @@ import asyncio
 import re
 import sys
 import urllib.parse
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Set
 from playwright.async_api import async_playwright, Page, BrowserContext
 
 if sys.platform.startswith("win"):
