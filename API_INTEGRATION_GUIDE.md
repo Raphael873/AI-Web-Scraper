@@ -293,6 +293,7 @@ import { createClient } from '@/utils/supabase/server';
 import { ScraperJobRequest, ScraperJobResponse } from '@/types/scraper';
 
 const SCRAPER_API_URL = process.env.NEXT_PUBLIC_SCRAPER_API_URL; // Ex: https://seu-scraper.up.railway.app
+const SCRAPER_API_KEY = process.env.SCRAPER_API_KEY; // Chave secreta definida no Railway
 
 export async function startScraping(params: {
   query?: string;
@@ -313,7 +314,7 @@ export async function startScraping(params: {
 
   const excludePhones = existingLeads ? existingLeads.map((l: { phone: string }) => l.phone) : [];
 
-  // 2. Chamar a API no Railway
+  // 2. Chamar a API no Railway com a chave de segurança
   const bodyPayload: ScraperJobRequest = {
     mode: params.mode || 'standard',
     query: params.query,
@@ -327,7 +328,10 @@ export async function startScraping(params: {
 
   const response = await fetch(`${SCRAPER_API_URL}/api/v1/scraper/jobs`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(SCRAPER_API_KEY ? { 'x-api-key': SCRAPER_API_KEY } : {})
+    },
     body: JSON.stringify(bodyPayload)
   });
 

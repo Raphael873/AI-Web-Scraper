@@ -6,14 +6,42 @@ Microserviço pronto para deploy no Railway e integração com SaaS / Supabase.
 import os
 from pathlib import Path
 from typing import Optional, Dict, Any, List
-from fastapi import FastAPI, BackgroundTasks, HTTPException, Query, status
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Query, status, Security, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.security import APIKeyHeader, HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 
 from jobs import job_manager, JobStatus, JobModel
 from history import lead_history
 from config import BASE_DIR, OUTPUT_DIR, BRAZIL_REGIONS
+
+# Configuração de Segurança (API Key / Bearer Token)
+api_key_header = APIKeyHeader(name="x-api-key", auto_error=False)
+bearer_security = HTTPBearer(auto_error=False)
+
+
+def verify_api_key(
+    header_key: Optional[str] = Security(api_key_header),
+    bearer_creds: Optional[HTTPAuthorizationCredentials] = Security(bearer_security)
+):
+    """
+    Valida a chave secreta de API.
+    - Se a variável de ambiente API_SECRET_KEY estiver configurada, exige a chave correta.
+    - Se API_SECRET_KEY não for definida, a API funciona de forma aberta para testes locais.
+    """
+    expected_secret = os.getenv("API_SECRET_KEY", "").strip()
+    if not expected_secret:
+        return True
+
+    provided_token = header_key or (bearer_creds.credentials if bearer_creds else None)
+    if not provided_token or provided_token != expected_secret:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Acesso não autorizado. Chave de API ('x-api-key' ou 'Authorization: Bearer') inválida ou ausente.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return True
 
 app = FastAPI(
     title="AI Fitness Lead Scraper API",
@@ -126,6 +154,7 @@ async def health_check():
     "/api/v1/scraper/jobs",
     response_model=JobResponse,
     status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(verify_api_key)],
     tags=["Scraper Jobs"],
     summary="Iniciar nova tarefa de raspagem de leads em background",
 )
@@ -164,6 +193,7 @@ async def create_scraper_job(
 
 @app.get(
     "/api/v1/scraper/history",
+    dependencies=[Depends(verify_api_key)],
     tags=["Histórico & Memória"],
     summary="Consultar estatísticas da memória histórica de leads e cursor geográfico",
 )
@@ -175,6 +205,7 @@ async def get_history_stats():
 @app.get(
     "/api/v1/scraper/jobs/{job_id}",
     response_model=JobModel,
+    dependencies=[Depends(verify_api_key)],
     tags=["Scraper Jobs"],
     summary="Consultar o status e progresso em tempo real de uma tarefa",
 )
@@ -188,6 +219,7 @@ async def get_job_status(job_id: str):
 
 @app.get(
     "/api/v1/scraper/jobs/{job_id}/results",
+    dependencies=[Depends(verify_api_key)],
     tags=["Scraper Jobs"],
     summary="Obter todos os leads estruturados em JSON para salvar no Supabase / Banco",
 )
@@ -221,6 +253,7 @@ async def get_job_results(job_id: str):
 
 @app.get(
     "/api/v1/scraper/jobs/{job_id}/download",
+    dependencies=[Depends(verify_api_key)],
     tags=["Scraper Jobs"],
     summary="Fazer download da planilha Excel formatada (.xlsx)",
 )
