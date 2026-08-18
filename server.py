@@ -101,13 +101,16 @@ async def root():
     """Endpoint raiz com informações e links rápidos."""
     return {
         "service": "AI Fitness Lead Scraper API",
+        "version": "1.1.0",
         "status": "online",
+        "features": ["anti_duplication", "geo_rotation_250_regions", "multi_llm_groq"],
         "docs": "/docs",
         "endpoints": {
             "create_job": "POST /api/v1/scraper/jobs",
             "get_status": "GET /api/v1/scraper/jobs/{job_id}",
             "get_results": "GET /api/v1/scraper/jobs/{job_id}/results",
             "download_excel": "GET /api/v1/scraper/jobs/{job_id}/download",
+            "history_stats": "GET /api/v1/scraper/history",
             "health": "GET /health"
         }
     }
